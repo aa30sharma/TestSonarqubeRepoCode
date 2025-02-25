@@ -38,5 +38,104 @@ stages:
             sonarQubeRunAnalysis: true
             sqMavenPluginVersionChoice: 'pom'
             codeCoverageToolOption: 'JaCoCo'
+##################################################################################################
+
+
+trigger:
+  - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  SONARQUBE_SERVICE_CONNECTION: 'SonarQubeService' # Define your SonarQube service connection name
+  SONAR_PROJECT_KEY: 'your-project-key'
+  SONAR_PROJECT_NAME: 'your-project-name'
+  SONAR_PROJECT_VERSION: '1.0'
+  SONAR_SCANNER_MODE: 'CLI'
+  DOCKER_IMAGE: 'your-docker-repo/your-app'
+  KUBERNETES_NAMESPACE: 'your-namespace'
+
+stages:
+  - stage: BuildAndAnalyze
+    displayName: 'Build Java App and SonarQube Analysis'
+    jobs:
+      - job: Build
+        displayName: 'Build Java Code'
+        steps:
+          - task: Maven@3
+            displayName: 'Maven Build'
+            inputs:
+              mavenPomFile: 'pom.xml'
+              goals: 'clean package'
+
+          - task: SonarQubePrepare@5
+            displayName: 'Prepare SonarQube Analysis'
+            inputs:
+              SonarQube: $(SONARQUBE_SERVICE_CONNECTION)
+              scannerMode: '$(SONAR_SCANNER_MODE)'
+              configMode: 'manual'
+              projectKey: '$(SONAR_PROJECT_KEY)'
+              projectName: '$(SONAR_PROJECT_NAME)'
+              projectVersion: '$(SONAR_PROJECT_VERSION)'
+
+          - task: SonarQubeAnalyze@5
+            displayName: 'Run Code Analysis'
+
+          - task: SonarQubePublish@5
+            displayName: 'Publish Quality Gate Result'
+            inputs:
+              pollingTimeoutSec: '300'
+
+          - script: |
+              echo "Checking Quality Gate Status..."
+              STATUS=$(curl -s -u $(SONARQUBE_TOKEN): "$(SONARQUBE_URL)/api/qualitygates/project_status?projectKey=$(SONAR_PROJECT_KEY)" | jq -r .projectStatus.status)
+              echo "Quality Gate Status: $STATUS"
+              if [ "$STATUS" != "OK" ]; then
+                echo "Quality Gate failed. Breaking the build."
+                exit 1
+              fi
+            displayName: 'Break Build on Quality Gate Failure'
+
+  - stage: BuildAndPushDocker
+    displayName: 'Build and Push Docker Image'
+    dependsOn: BuildAndAnalyze
+    condition: succeeded()
+    jobs:
+      - job: DockerBuildPush
+        displayName: 'Build and Push Docker Image'
+        steps:
+          - task: Docker@2
+            displayName: 'Build Docker Image'
+            inputs:
+              command: 'build'
+              dockerfile: '**/Dockerfile'
+              repository: '$(DOCKER_IMAGE)'
+              tags: 'latest'
+
+          - task: Docker@2
+            displayName: 'Push Docker Image'
+            inputs:
+              command: 'push'
+              repository: '$(DOCKER_IMAGE)'
+              tags: 'latest'
+
+  - stage: DeployToKubernetes
+    displayName: 'Deploy to Kubernetes'
+    dependsOn: BuildAndPushDocker
+    condition: succeeded()
+    jobs:
+      - job: Deploy
+        displayName: 'Deploy to AKS'
+        steps:
+          - task: Kubernetes@1
+            displayName: 'Deploy to Kubernetes'
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: 'your-k8s-service-connection'
+              namespace: '$(KUBERNETES_NAMESPACE)'
+              command: 'apply'
+              arguments: '-f k8s/deployment.yaml'
+
             
             
